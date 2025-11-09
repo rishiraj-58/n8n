@@ -6,10 +6,10 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeConnectionTypes, NodeOperationError, jsonParse } from 'n8n-workflow';
 
 import { formatPrivateKey } from '../../utils/utilities';
-import { parseJsonParameter } from '../Set/v2/helpers/utils';
+import { parseJsonParameter, resolveRawData } from '../Set/v2/helpers/utils';
 
 const prettifyOperation = (operation: string) => {
 	if (operation === 'sign') {
@@ -348,6 +348,22 @@ export class Jwt implements INodeType {
 
 		const operation = this.getNodeParameter('operation', 0);
 
+		// Preprocess raw expressions like the Set node does
+		const rawData: IDataObject = {};
+
+		if (operation === 'sign') {
+			const useJson = this.getNodeParameter('useJson', 0) as boolean;
+			if (useJson) {
+				const claimsJson = this.getNodeParameter('claimsJson', 0, '', {
+					rawExpressions: true,
+				}) as string;
+
+				if (claimsJson?.startsWith('=')) {
+					rawData.claimsJson = claimsJson.replace(/^=+/, '');
+				}
+			}
+		}
+
 		const credentials = await this.getCredentials<{
 			keyType: 'passphrase' | 'pemKey';
 			publicKey: string;
@@ -373,11 +389,30 @@ export class Jwt implements INodeType {
 					let payload: IDataObject = {};
 
 					if (useJson) {
-						payload = parseJsonParameter(
-							this.getNodeParameter('claimsJson', itemIndex) as IDataObject,
-							this.getNode(),
-							itemIndex,
-						);
+						if (rawData.claimsJson === undefined) {
+							const claimsJson = this.getNodeParameter('claimsJson', itemIndex) as string;
+							payload = parseJsonParameter(claimsJson, this.getNode(), itemIndex);
+						} else {
+							const resolvedData = resolveRawData.call(
+								this,
+								rawData.claimsJson as string,
+								itemIndex,
+							);
+
+							const cleanedData = resolvedData.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+
+							try {
+								payload = jsonParse<IDataObject>(cleanedData);
+							} catch (error) {
+								throw new NodeOperationError(
+									this.getNode(),
+									`The 'Payload Claims (JSON)' in item ${itemIndex} contains invalid JSON`,
+									{
+										description: cleanedData,
+									},
+								);
+							}
+						}
 					} else {
 						payload = this.getNodeParameter('claims', itemIndex) as IDataObject;
 					}
